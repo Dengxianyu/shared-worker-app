@@ -5,16 +5,40 @@ import { WorkerExposeApi } from './worker';
 
 // delete window.SharedWorker;
 
-const { SharedWorkerPonyfill, SharedWorkerSupported } = await import("@okikio/sharedworker");
-let myWorker: Comlink.Remote<WorkerExposeApi>;
+const { SharedWorkerSupported, SharedWorkerPonyfill } = await import("@okikio/sharedworker");
+let myWorker: SharedWorkerPonyfill;
+let workerApi: Comlink.Remote<WorkerExposeApi>;
 
 if (SharedWorkerSupported) {
-  myWorker = Comlink.wrap<WorkerExposeApi>(new SharedWorkerPonyfill(new SharedWorker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" })).port);
+  myWorker = new SharedWorkerPonyfill(new SharedWorker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }));
+  workerApi = Comlink.wrap<WorkerExposeApi>(myWorker.port);
 } else {
-  myWorker = Comlink.wrap<WorkerExposeApi>(new SharedWorkerPonyfill(new Worker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" })).port);
+  myWorker = new SharedWorkerPonyfill(new Worker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }));
+  workerApi = Comlink.wrap<WorkerExposeApi>(myWorker);
 }
 // const myWorker = Comlink.wrap<WorkerExposeApi>(new SharedWorker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }).port);
 
+
+function useSubWorker(listener: (counter: number) => void) {
+  const subIdRef = useRef<string | null>(null);
+  const isFirstTimeRender = useRef(true);
+  useEffect(() => {
+    if (isFirstTimeRender.current) {
+      isFirstTimeRender.current = false;
+      workerApi.subscribe(Comlink.proxy(listener)).then((subId: string) => {
+        subIdRef.current = subId;
+      })
+    }
+  }, [listener]);
+
+  useEffect(() => {
+    return () => {
+      if (subIdRef.current) {
+        workerApi.unsubscribe(subIdRef.current);
+      }
+    }
+  }, []);
+}
 
 function AppContent() {
   const [count, setCount] = useState(0);
@@ -24,43 +48,41 @@ function AppContent() {
   useEffect(() => {
     // 初始化获取计数值
     async function initCounter() {
-      const value = await myWorker.counter;
+      const threadId = await workerApi.init();
+      window.threadId = threadId;
+      const value = await workerApi.counter;
       setCount(value);
     }
-    initCounter();
+    if (isFirstTimeRender.current) {
+      initCounter();
+      isFirstTimeRender.current = false;
+    }
   }, []);
 
-  useEffect(() => {
-      if (isFirstTimeRender.current) {
-        isFirstTimeRender.current = false;
-        myWorker.subscribe(Comlink.proxy((newValue: number) => {
-          setCount(newValue);
-        })).then((subId: string) => {
-          subIdRef.current = subId;
-        })
-      }
-  }, []);
+  useSubWorker((newValue: number) => {
+    setCount(newValue);
+  });
 
   useEffect(() => {
     return () => {
       if (subIdRef.current) {
-        myWorker.unsubscribe(subIdRef.current);
+        workerApi.unsubscribe(subIdRef.current);
       }
     }
   }, []); 
 
   const handleIncrement = async () => {
-    const value = await myWorker?.inc();
+    const value = await workerApi.inc();
     console.log('Incremented value:', value);
   };
 
   const handleDecrement = () => {
-    myWorker?.dec();
+    workerApi.dec();
   };
 
   useEffect(() => {
     window.addEventListener('beforeunload', () => {
-      myWorker[Comlink.releaseProxy]()
+      workerApi.beforeUnload(window.threadId);
     });
   }, []);
 

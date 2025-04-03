@@ -3,17 +3,32 @@ import * as Comlink from 'comlink';
 // 声明 SharedWorker 的全局作用域
 declare const self: SharedWorkerGlobalScope;
 
-const allPorts = new WeakSet<MessagePort>();
-
-self.allPorts = allPorts;
+type callbacksMap = {
+  eventName: 'counterChange';
+  callback: (counter: number) => void;
+} | {
+  eventName: 'test';
+  callback: () => void;
+}
 
 export class WorkerExposeApi {
   counter: number;
   private listeners: Map<string, (counter: number) => void>;
-
+  private threadIds = new Set<string>();
   constructor() {
     this.counter = 0;
     this.listeners = new Map();
+    self.threadIds = this.threadIds;
+  }
+
+  init() {
+    const threadId = Math.random().toString(36).substring(2, 15);
+    this.threadIds.add(threadId);
+    return threadId
+  }
+
+  beforeUnload(threadId: string) {
+    this.threadIds.delete(threadId);
   }
 
   inc() {
@@ -32,10 +47,6 @@ export class WorkerExposeApi {
 
   getValue() {
     return this.counter;
-  }
-
-  deleteOnePorts() {
-    allPorts.delete(port);
   }
 
   // 添加监听器（客户端需要用 Comlink.proxy() 包装回调函数）
@@ -57,21 +68,16 @@ export class WorkerExposeApi {
       listener(this.counter);
     }
   }
-
-  [Comlink.finalizer](port: MessagePort) {
-    console.log("🚀 ~ WorkerExposeApi ~ port:", port)
-    allPorts.delete(port);
-  }
 }
 
 const exposeApi = new WorkerExposeApi();
 
 function start(port: MessagePort) {
-  port.onmessage = (event) => {
-    if (event.data === 'beforeunload') {
-      allPorts.delete(port);
-    }
-  }
+  // port.onmessage = (event) => {
+  //   if (event.data === 'beforeunload') {
+  //     allPorts.delete(port);
+  //   }
+  // }
   Comlink.expose(exposeApi, port);
 }
 
@@ -79,7 +85,6 @@ function start(port: MessagePort) {
 self.onconnect = function(event: MessageEvent) {
   const port = event.ports[0];
   if (port) {
-    allPorts.add(port);
     start(port);
   }
 };
