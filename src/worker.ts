@@ -1,128 +1,102 @@
 /// <reference lib="webworker" />
 import * as Comlink from 'comlink';
+import { nanoid } from 'nanoid';
 // 声明 SharedWorker 的全局作用域
 declare const self: SharedWorkerGlobalScope;
 
-// 创建一个 Set 存储端点 ID
 const endpointIds = new Set<string>();
 
-// 定义事件名称数组
-const allEvents = ['onCounterChange', 'onWorkerInitSuccess'] as const;
-type EventName = typeof allEvents[number];
-
-// 定义事件回调映射
-export interface EventCallbackMap {
-  onCounterChange: (count: number) => void;
-  onWorkerInitSuccess: (endpointId: string) => void;
+export type EventCallbackMap = {
+  counterChange: (counter: number) => void;
+  workerInitSuccess: (endpointId: string) => void;
+  endpointIdsChange: (endpointIds: string[]) => void;
 }
 
-// 定义回调方法集合类型
-type Callbacks = {
-  [K in EventName]: (cb: EventCallbackMap[K]) => string;
-};
-
-// 定义监听器类型，使用字符串联合类型作为键
 type ListenersType = {
-  [K in EventName as `${string}__${K}`]?: EventCallbackMap[K];
-};
+  [K in keyof EventCallbackMap as `${string}__${K}`]?: EventCallbackMap[K];
+}
 
-// 工厂函数
-function createWorkerApi() {
-  // 创建监听器存储对象
-  const listeners: ListenersType = {};
+export type Callbacks = {
+  [K in keyof EventCallbackMap]: (cb: EventCallbackMap[K]) => string;
+}
 
-  // 私有方法：添加监听器
-  function subscribe<T extends EventName>(eventName: T, cb: EventCallbackMap[T]): string {
-    const subId = Math.random().toString(36).substring(2, 15);
-    const key = `${subId}__${eventName}` as const;
-    // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-    listeners[key] = cb;
-    return subId;
+export class WorkerExposeApi {
+  private listeners: ListenersType = {};
+  counter: number;
+
+  constructor() {
+    this.counter = 0;
   }
 
-  // 私有方法：通知所有监听器
-  function notifyListeners<T extends EventName>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]): void {
-    for (const listenerKey of Object.keys(listeners)) {
+  inc(num: number) {
+    this.counter += num;
+    // 通知所有监听器
+    this.triggerListener('counterChange', this.counter);
+    return this.counter;
+  }
+
+  dec() {
+    this.counter--;
+    // 通知所有监听器
+    this.triggerListener('counterChange', this.counter);
+    return this.counter;
+  }
+
+  // 添加监听器（客户端需要用 Comlink.proxy() 包装回调函数）
+  addListener<T extends keyof EventCallbackMap>(eventName: T, cb: EventCallbackMap[T]) {
+    const listenerId = `listenerId__${nanoid(8)}`;
+    // @ts-expect-error: 无法避免的类型错误
+    this.listeners[`${listenerId}__${eventName}`] = cb;
+    return listenerId;
+  }   
+
+  // 私有方法，通知所有匹配到 eventName 的 callback 执行
+  private triggerListener<T extends keyof EventCallbackMap>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]) {
+    for (const listenerKey of Object.keys(this.listeners)) {
       if (listenerKey.includes(eventName)) {
-        // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-        const callback = listeners[listenerKey];
-        if (callback) {
-          callback(data);
-        }
+        // @ts-expect-error: 无法避免的类型错误
+        this.listeners[listenerKey](data);
       }
     }
   }
 
-  // 动态创建 subEvents 对象
-  const allSubEvents = allEvents.reduce((acc, event) => {
-    acc[event] = (cb: EventCallbackMap[typeof event]) => {
-      return subscribe(event, cb);
-    };
-    return acc;
-  }, {} as Callbacks);
-
-  // 返回 API 对象
-  return {
-    counter: 0,
-    ...allSubEvents,
-
-    beforeUnload(endpointId: string) {
-      endpointIds.delete(endpointId);
-    },
-
-    inc(num: number) {
-      this.counter += num;
-      notifyListeners('onCounterChange', this.counter);
-      return this.counter;
-    },
-
-    dec() {
-      this.counter--;
-      notifyListeners('onCounterChange', this.counter);
-      return this.counter;
-    },
-
-    off(subId: string) {
-      for (const listenerKey of Object.keys(listeners)) {
-        if (listenerKey.startsWith(subId)) {
-          // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-          delete listeners[listenerKey];
-        }
+  // 取消监听器
+  off(listenerId: string) {
+    for (const listenerKey of Object.keys(this.listeners)) {
+      if (listenerKey.startsWith(listenerId)) {
+        delete this.listeners[listenerKey as keyof ListenersType];
       }
-    },
+    }
+  }
 
-    getAllEndpointIds() {
-      return Array.from(endpointIds);
-    },
+  getAllEndpointIds() {
+    return Array.from(endpointIds);
+  }
 
-    test<T extends EventName>(eventName: T, cb: EventCallbackMap[T]) {
-      const subId = Math.random().toString(36).substring(2, 15);
-      const key = `${subId}__${eventName}` as const;
-      // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-      listeners[key] = cb;
-      return subId;
-    },
 
-    notifyListeners
-  };
+  beforeUnload(endpointId: string) {
+    endpointIds.delete(endpointId);
+    this.triggerListener('endpointIdsChange', Array.from(endpointIds));
+  }
 }
 
-export type WorkerExposeApi = ReturnType<typeof createWorkerApi>;
+const exposeApi = new WorkerExposeApi();
 
-// 使用工厂函数创建 API
-const workerApi = createWorkerApi();
 
 function start(port: MessagePort) {
   // 每次有新的连接时，生成一个唯一的 endpointId
-  const endpointId = Math.random().toString(36).substring(2, 15);
+  const endpointId = `endpointId__${nanoid(8)}`;
   endpointIds.add(endpointId);
   // 暴露给客户端的 API 是同一个对象，这样才能达到如 counter 这种值的共享
-  Comlink.expose(workerApi, port);
-  // 延迟 0.5s 再通知客户端初始化成功，避免客户端的监听事件还未生效就通知了
+  Comlink.expose(exposeApi, port);
+  // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端，所以不去掉 private
+  exposeApi.triggerListener('endpointIdsChange', Array.from(endpointIds));
+  // 延迟 100ms 再通知客户端初始化成功，避免客户端的监听事件还未生效就通知了
   setTimeout(() => {
     console.log('通知客户端初始化成功', endpointId);
-    workerApi.notifyListeners('onWorkerInitSuccess', endpointId);
-  }, 500);
+    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端，所以不去掉 private
+    exposeApi.triggerListener('workerInitSuccess', endpointId);
+  }, 100);
 }
 
 // 当有新连接时触发
