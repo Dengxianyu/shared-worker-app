@@ -26,8 +26,7 @@ const getEndpointId = (() => {
       if (globalEndpointId) {
         resolve(globalEndpointId);
       }
-      // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-      workerApi.subEvents['onWorkerInitSuccess'](Comlink.proxy((endpointId: string) => {
+      workerApi.onWorkerInitSuccess(Comlink.proxy((endpointId: string) => {
         globalEndpointId = endpointId;
         resolve(endpointId);
         window.addEventListener('beforeunload', () => {
@@ -49,14 +48,14 @@ getEndpointId().then((endpointId) => {
   console.log('endpointId', endpointId);
 })
 
-function useSubWorker<T extends keyof EventCallbackMap>(eventName: T, listener: EventCallbackMap[T]) {
+function useSubWorkerEvent<T extends keyof EventCallbackMap>(eventName: T, listener: EventCallbackMap[T]) {
   const subIdRef = useRef<string | null>(null);
   const isFirstTimeRender = useRef(true);
   useEffect(() => {
     if (isFirstTimeRender.current) {
       isFirstTimeRender.current = false;
       // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
-      workerApi.subEvents[eventName](Comlink.proxy(listener)).then((subId: string) => {
+      workerApi[eventName](Comlink.proxy(listener)).then((subId: string) => {
         subIdRef.current = subId;
       })
     }
@@ -88,9 +87,16 @@ function AppContent() {
     }
   }, []);
 
-  useSubWorker('onCounterChange', (counter: number) => {
+  useSubWorkerEvent('onCounterChange', (counter: number) => {
     setCount(counter);
   });
+
+  // useEffect(() => {
+  //   workerApi.test('onCounterChange', Comlink.proxy((counter: number) => {
+  //     console.log('counter', counter);
+  //     setCount(counter);
+  //   }));
+  // }, []);
 
 
   const handleIncrement = async () => {
@@ -101,12 +107,6 @@ function AppContent() {
   const handleDecrement = () => {
     workerApi.dec();
   };
-
-  useEffect(() => {
-    window.addEventListener('beforeunload', () => {
-      // workerApi.beforeUnload(window.threadId);
-    });
-  }, []);
 
 
   return (
