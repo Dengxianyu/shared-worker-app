@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef } from 'react'
 import * as Comlink from 'comlink';
 import './App.css'
-import { WorkerExposeApi } from './worker';
+import { EventCallbackMap, WorkerExposeApi } from './worker';
+import { type SharedWorkerPonyfill as TTT } from '@okikio/sharedworker';
 
 // delete window.SharedWorker;
 
 const { SharedWorkerSupported, SharedWorkerPonyfill } = await import("@okikio/sharedworker");
-let myWorker: SharedWorkerPonyfill;
+let myWorker: TTT;
 let workerApi: Comlink.Remote<WorkerExposeApi>;
 
 if (SharedWorkerSupported) {
@@ -16,40 +17,68 @@ if (SharedWorkerSupported) {
   myWorker = new SharedWorkerPonyfill(new Worker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }));
   workerApi = Comlink.wrap<WorkerExposeApi>(myWorker);
 }
-// const myWorker = Comlink.wrap<WorkerExposeApi>(new SharedWorker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }).port);
+
+const getEndpointId = (() => {
+  let globalEndpointId: string | null = null;
+  let subId: string | null = null;
+  return () => {
+    return new Promise<string>((resolve) => {
+      if (globalEndpointId) {
+        resolve(globalEndpointId);
+      }
+      // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
+      workerApi.subEvents['onWorkerInitSuccess'](Comlink.proxy((endpointId: string) => {
+        globalEndpointId = endpointId;
+        resolve(endpointId);
+        window.addEventListener('beforeunload', () => {
+            workerApi.beforeUnload(endpointId);
+        });
+        // 一旦触发过一次就取消订阅，防止新开网页时也触发 onWorkerInitSuccess 时把自己的 endpointId 覆盖了
+        if (subId) {
+          workerApi.off(subId);
+        }
+      })).then((_subId: string) => {
+        subId = _subId;
+      });
+    })
+  }
+})()
 
 
-function useSubWorker(listener: (counter: number) => void) {
+getEndpointId().then((endpointId) => {
+  console.log('endpointId', endpointId);
+})
+
+function useSubWorker<T extends keyof EventCallbackMap>(eventName: T, listener: EventCallbackMap[T]) {
   const subIdRef = useRef<string | null>(null);
   const isFirstTimeRender = useRef(true);
   useEffect(() => {
     if (isFirstTimeRender.current) {
       isFirstTimeRender.current = false;
-      workerApi.subscribe(Comlink.proxy(listener)).then((subId: string) => {
+      // @ts-expect-error: 这里需要使用 EventCallbackMap 的 key 来调用 subEvents 方法
+      workerApi.subEvents[eventName](Comlink.proxy(listener)).then((subId: string) => {
         subIdRef.current = subId;
       })
     }
-  }, [listener]);
+  }, [eventName, listener]);
 
   useEffect(() => {
     return () => {
       if (subIdRef.current) {
-        workerApi.unsubscribe(subIdRef.current);
+        workerApi.off(subIdRef.current);
       }
     }
   }, []);
 }
 
+
 function AppContent() {
   const [count, setCount] = useState(0);
   const isFirstTimeRender = useRef(true);
-  const subIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     // 初始化获取计数值
     async function initCounter() {
-      const threadId = await workerApi.init();
-      window.threadId = threadId;
       const value = await workerApi.counter;
       setCount(value);
     }
@@ -59,20 +88,13 @@ function AppContent() {
     }
   }, []);
 
-  useSubWorker((newValue: number) => {
-    setCount(newValue);
+  useSubWorker('onCounterChange', (counter: number) => {
+    setCount(counter);
   });
 
-  useEffect(() => {
-    return () => {
-      if (subIdRef.current) {
-        workerApi.unsubscribe(subIdRef.current);
-      }
-    }
-  }, []); 
 
   const handleIncrement = async () => {
-    const value = await workerApi.inc();
+    const value = await workerApi.inc(123);
     console.log('Incremented value:', value);
   };
 
@@ -82,7 +104,7 @@ function AppContent() {
 
   useEffect(() => {
     window.addEventListener('beforeunload', () => {
-      workerApi.beforeUnload(window.threadId);
+      // workerApi.beforeUnload(window.threadId);
     });
   }, []);
 
@@ -98,6 +120,13 @@ function AppContent() {
           </button>
           <button onClick={handleIncrement}>
             增加
+          </button>
+          <button onClick={() => {
+            workerApi.getAllEndpointIds().then((endpointIds) => {
+              console.log('endpointIds', endpointIds);
+            })
+          }}>
+            获取所有 endpointIds
           </button>
         </div>
         <p>
