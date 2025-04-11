@@ -1,5 +1,5 @@
 {
-  "name": "shared-worker-app",
+  "name": "advanced-shared-worker",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,6 +12,7 @@
   "dependencies": {
     "@okikio/sharedworker": "^1.1.0",
     "comlink": "^4.4.2",
+    "debug": "^4.4.0",
     "nanoid": "^5.1.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
+    "@types/debug": "^4.1.12",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",

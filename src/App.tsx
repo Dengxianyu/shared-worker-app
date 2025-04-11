@@ -2,7 +2,11 @@ import { useEffect, useState, useRef } from 'react'
 import * as Comlink from 'comlink';
 import './App.css'
 import { EventCallbackMap, WorkerExposeApi } from './worker';
-import { type SharedWorkerPonyfill as TTT } from '@okikio/sharedworker';
+import { type SharedWorkerPonyfill as SharedWorkerPonyfillType } from '@okikio/sharedworker';
+import debug from 'debug';
+
+const appLog = debug('app').extend('render');
+const workerLog = debug('app').extend('worker');
 
 // 执行下面一行，模拟 SharedWorker 不支持的环境。在 SharedWorker 不支持情况下，可以看到网页之间不共享了，这也是预期行为
 // 以我这次想要把 mqtt client 服务放在 SharedWorker 中为例子，如果 SharedWorker 不支持，那么 mqtt client 服务在
@@ -10,8 +14,10 @@ import { type SharedWorkerPonyfill as TTT } from '@okikio/sharedworker';
 // 如果 SharedWorker 支持，那么 mqtt client 服务在 SharedWorker 中只生成一个，也能保障各自共享一份 workerExposeApi 实例而同步
 // delete window.SharedWorker;
 
+
+// 这样异步 import 是为了保障 SharedWorkerSupported 的判断在 delete window.SharedWorker; 之后，如果是顶部 import 的话，SharedWorkerSupported 的判断就会在 delete 执行前已经得出了结果了
 const { SharedWorkerSupported, SharedWorkerPonyfill } = await import("@okikio/sharedworker");
-let myWorker: TTT;
+let myWorker: SharedWorkerPonyfillType;
 let workerApi: Comlink.Remote<WorkerExposeApi>;
 
 if (SharedWorkerSupported) {
@@ -21,21 +27,6 @@ if (SharedWorkerSupported) {
   myWorker = new SharedWorkerPonyfill(new Worker(new URL("./worker.ts", import.meta.url), { name: "position-sync", type: "module" }));
   workerApi = Comlink.wrap<WorkerExposeApi>(myWorker);
 }
-
-/** 一个对官方 Promise.withResolvers 的实现，因为其兼容性不佳 */
-export function PromiseWithResolvers<T>() {
-	let resolve: (value: T | PromiseLike<T>) => void = () => {};
-	let reject: (reason?: unknown) => void = () => {};
-	const promise = new Promise<T>((res, rej) => {
-		resolve = res;
-		reject = rej;
-	});
-  promise.then((xxx) => {
-    console.log('xxx', xxx);
-  })
-	return { promise, resolve, reject };
-}
-
 
 const getEndpointId = (() => {
   let globalEndpointId: string | null = null;
@@ -72,7 +63,7 @@ const getEndpointId = (() => {
 
 
 getEndpointId().then((endpointId) => {
-  console.log('endpointId', endpointId);
+  workerLog('endpointId', endpointId);
 })
 
 function useGetEndpointId() {
@@ -147,7 +138,7 @@ function AppContent() {
 
   const handleIncrement = async () => {
     const value = await workerApi.inc(123);
-    console.log('Incremented value:', value);
+    appLog('Incremented value:', value);
   };
 
   const handleDecrement = () => {
