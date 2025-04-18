@@ -176,7 +176,6 @@ import { nanoid } from 'nanoid';
 // 定义事件回调映射
 export type EventCallbackMap = {
   counterChange: (counter: number) => void;
-  workerInitSuccess: (endpointId: string) => void;
   endpointIdsChange: (endpointIds: string[]) => void;
 }
 
@@ -194,6 +193,8 @@ export type Callbacks = {
 export class WorkerExposeApi {
   private listeners: ListenersType = {};
   counter: number;
+  /** 记录所有连接的 endpointId，可直接通过属性访问 */
+  endpointIds = new Set<string>();
 
   constructor() {
     this.counter = 0;
@@ -202,14 +203,14 @@ export class WorkerExposeApi {
   inc(num: number) {
     this.counter += num;
     // 通知所有监听器
-    this.triggerListener('counterChange', this.counter);
+    this.emit('counterChange', this.counter);
     return this.counter;
   }
 
   dec() {
     this.counter--;
     // 通知所有监听器
-    this.triggerListener('counterChange', this.counter);
+    this.emit('counterChange', this.counter);
     return this.counter;
   }
 
@@ -222,7 +223,7 @@ export class WorkerExposeApi {
   }   
 
   // 私有方法，通知所有匹配到 eventName 的 callback 执行
-  private triggerListener<T extends keyof EventCallbackMap>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]) {
+  private emit<T extends keyof EventCallbackMap>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]) {
     for (const listenerKey of Object.keys(this.listeners)) {
       if (listenerKey.includes(eventName)) {
         // @ts-expect-error: 无法避免的类型错误
@@ -240,13 +241,18 @@ export class WorkerExposeApi {
     }
   }
 
-  getAllEndpointIds() {
-    return Array.from(endpointIds);
+  // 添加新的端点 ID（由客户端生成并传入）
+  addEndpointId(endpointId: string) {
+    this.endpointIds.add(endpointId);
+    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
+    this.emit('endpointIdsChange', Array.from(this.endpointIds));
   }
 
+  // 标签页关闭时移除端点 ID
   beforeUnload(endpointId: string) {
-    endpointIds.delete(endpointId);
-    this.triggerListener('endpointIdsChange', Array.from(endpointIds));
+    this.endpointIds.delete(endpointId);
+    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
+    this.emit('endpointIdsChange', Array.from(this.endpointIds));
   }
 }
 
@@ -255,30 +261,42 @@ const exposeApi = new WorkerExposeApi();
 
 // Worker连接处理
 function start(port: MessagePort) {
-  // 使用nanoid生成唯一的endpointId
-  const endpointId = `endpointId__${nanoid(8)}`;
-  endpointIds.add(endpointId);
-  
   // 暴露API给客户端
   Comlink.expose(exposeApi, port);
-  
-  // 通知所有客户端endpointIds已更新
-  // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
-  exposeApi.triggerListener('endpointIdsChange', Array.from(endpointIds));
-  
-  // 延迟通知初始化成功
-  setTimeout(() => {
-    console.log('通知客户端初始化成功', endpointId);
-    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
-    exposeApi.triggerListener('workerInitSuccess', endpointId);
-  }, 100);
 }
 ```
 
-在 React 环境下，我们创建了 `useWorkerEvent` hook 简化使用:
+在客户端，我们实现了 `getEndpointId` 函数，它能可靠地生成并管理当前标签页的 endpointId：
 
 ```typescript
-function useWorkerEvent<T extends keyof EventCallbackMap>(
+const getEndpointId = (() => {
+  let globalEndpointId: string | null = null;
+  return () => {
+    if (globalEndpointId) {
+      return globalEndpointId;
+    }
+    // 客户端自己生成唯一的 endpointId
+    globalEndpointId = `endpointId__${nanoid(8)}`;
+    // 通知 worker 添加该 endpointId
+    workerApi.addEndpointId(globalEndpointId);
+    
+    // 设置页面关闭时的清理逻辑
+    window.addEventListener('beforeunload', () => {
+      if (globalEndpointId) {
+        workerApi.beforeUnload(globalEndpointId);
+      }
+    });
+    
+    return globalEndpointId;
+  };
+})();
+```
+
+此外，我们还创建了一些有用的React Hooks来简化API使用：
+
+```typescript
+// 订阅Worker事件的通用Hook
+function useSubWorkerEvent<T extends keyof EventCallbackMap>(
   eventName: T, 
   listener: EventCallbackMap[T]
 ) {
@@ -288,7 +306,6 @@ function useWorkerEvent<T extends keyof EventCallbackMap>(
   useEffect(() => {
     if (isFirstTimeRender.current) {
       isFirstTimeRender.current = false;
-      // 使用 Comlink.proxy 包装回调函数
       workerApi.addListener(eventName, Comlink.proxy(listener)).then((listenerId: string) => {
         listenerIdRef.current = listenerId;
       });
@@ -304,186 +321,36 @@ function useWorkerEvent<T extends keyof EventCallbackMap>(
     }
   }, []);
 }
-
-// 使用示例
-useWorkerEvent('counterChange', (counter) => {
-  setCount(counter);
-});
 ```
 
-这种设计的优势：
-1. 唯一ID - 使用nanoid生成更可靠的唯一标识符
-2. 类型安全 - 使用TypeScript接口规范事件名称和回调类型
-3. 事件丰富 - 支持多种事件类型，包括计数器变化、初始化成功和连接状态变更
-4. 封装良好 - 使用类实现，将逻辑和状态集中管理
-
-### 3.4 SharedWorker 多标签页管理
-
-在 SharedWorker 环境中，管理多个连接的标签页是一项重要任务。为了说明这种需求的重要性，我们来看一个具体的业务场景：
-
-我们有一个业务需求，希望将 MQTT 服务放在 SharedWorker 中运行（因为 MQTT 需要保持长连接，放在 SharedWorker 中可以让多个标签页共享一个连接），并且希望只有在所有标签页都关闭或休眠时才断开 MQTT 连接以节省资源和网络流量。
-
-要满足这个需求，我们需要实现以下三点：
-1. Worker 必须正确存储当前连接的所有标签页的标识符 (endpointId)
-2. 每个连接到 Worker 的标签页都能获得自己唯一的 endpointId
-3. 在网页卸载时，必须通知 Worker 删除相应的 endpointId
-
-这就是为什么我们设计了完整的标签页生命周期管理系统：
-
-**标签页生命周期管理流程**:
-
-```mermaid
-sequenceDiagram
-    participant Tab as 网页标签页
-    participant Worker as SharedWorker
-    
-    Note over Tab,Worker: 连接建立
-    Tab->>Worker: 连接到 SharedWorker
-    Worker->>Worker: 生成 endpointId
-    Worker->>Worker: 将 endpointId 添加到集合
-    Worker-->>Tab: 触发 onWorkerInitSuccess(endpointId)
-    Tab->>Tab: 存储 endpointId
-    Tab->>Tab: 取消 onWorkerInitSuccess 监听
-    
-    Note over Tab,Worker: 标签页使用期间
-    Tab->>Worker: API 调用 (inc, dec 等)
-    Worker-->>Tab: 事件通知 (onCounterChange 等)
-    
-    Note over Tab,Worker: 标签页关闭
-    Tab->>Worker: beforeunload 事件触发
-    Tab->>Worker: beforeUnload(endpointId)
-    Worker->>Worker: 从集合中移除 endpointId
-    
-    Note over Worker: 监控连接状态
-    Tab->>Worker: getAllEndpointIds()
-    Worker-->>Tab: 返回当前连接的所有 endpointId
-```
-
-在 Worker 端，我们维护一个集合来存储所有连接的 endpointId：
+在组件中获取所有连接端点的方式也得到了简化，现在可以直接访问 Worker 实例的 endpointIds 属性：
 
 ```typescript
-// Worker 端代码
-// 创建一个 Set 存储端点 ID
-const endpointIds = new Set<string>();
-
-function start(port: MessagePort) {
-  // 每次有新的连接时，生成一个唯一的 endpointId
-  const endpointId = `endpointId__${nanoid(8)}`;
-  endpointIds.add(endpointId);
-  
-  // 暴露 API 并通知客户端初始化成功
-  Comlink.expose(exposeApi, port);
-  
-  // 通知所有客户端 endpointIds 已更新
-  // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
-  exposeApi.triggerListener('endpointIdsChange', Array.from(endpointIds));
-  
-  // 延迟通知初始化成功
-  setTimeout(() => {
-    console.log('通知客户端初始化成功', endpointId);
-    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端
-    exposeApi.triggerListener('workerInitSuccess', endpointId);
-  }, 100);
-}
-```
-
-在客户端，我们实现了 `getEndpointId` 函数，它能可靠地获取并管理当前标签页的 endpointId：
-
-```typescript
-const getEndpointId = (() => {
-  let globalEndpointId: string | null = null;
-  let listenerId: string | null = null;
-  let getEndpointIdPromise: Promise<string> | null = null;
-  
-  return () => {
-    // 防止同时有多个请求，而导致创建了多个 workerInitSuccess listener
-    if (getEndpointIdPromise) {
-      return getEndpointIdPromise;
-    }
-
-    getEndpointIdPromise = new Promise<string>((resolve) => {
-      if (globalEndpointId) {
-        resolve(globalEndpointId);
-        return;
-      }
-      
-      workerApi.addListener('workerInitSuccess', Comlink.proxy((endpointId: string) => {
-        globalEndpointId = endpointId;
-        resolve(endpointId);
-        
-        // 设置页面关闭时的清理逻辑
-        window.addEventListener('beforeunload', () => {
-          workerApi.beforeUnload(endpointId);
-        });
-        
-        // 一旦触发过一次就取消订阅，防止新开网页时也触发 workerInitSuccess 时把自己的 endpointId 覆盖
-        if (listenerId) {
-          workerApi.off(listenerId);
-        }
-      })).then((_listenerId: string) => {
-        listenerId = _listenerId;
-      });
-    });
-    
-    return getEndpointIdPromise;
-  };
-})();
-```
-
-此外，我们还创建了一些有用的React Hooks来简化API使用：
-
-```typescript
-// 在组件中获取当前页面的endpointId
-function useGetEndpointId() {
-  const [endpointId, setEndpointId] = useState<string | null>(null);
-  useEffect(() => {
-    getEndpointId().then((endpointId) => {
-      setEndpointId(endpointId);
-    })
-  }, []);
-  return endpointId;
-}
-
-// 获取所有连接的页面ID并实时更新
-function useGetAllEndpointIds() {
+function AppContent() {
+  const [count, setCount] = useState(0);
   const [endpointIds, setEndpointIds] = useState<string[]>([]);
+  const endpointId = getEndpointId();
+  
   useEffect(() => {
-    workerApi.getAllEndpointIds().then((endpointIds) => {
-      setEndpointIds(endpointIds);
-    })
-  }, []); 
-
-  // 监听endpointIds变化
-  useSubWorkerEvent('endpointIdsChange', (endpointIds: string[]) => {
-    setEndpointIds(endpointIds);
-  });
-
-  return endpointIds;
+    // 初始化获取计数值和端点ID列表
+    async function init() {
+      const value = await workerApi.counter;
+      setCount(value);
+      
+      // 直接从 Worker 实例获取 endpointIds
+      const ids = await workerApi.endpointIds;
+      setEndpointIds(Array.from(ids));
+    }
+    init();
+    
+    // 监听端点ID变化
+    useSubWorkerEvent('endpointIdsChange', (updatedIds: string[]) => {
+      setEndpointIds(updatedIds);
+    });
+  }, []);
+  
+  // 其余组件代码...
 }
 ```
 
 这个架构使我们能够准确跟踪所有连接的标签页，并在标签页关闭时执行必要的清理。它解决了共享 Worker 应用中常见的资源管理和生命周期问题，特别适合需要维护共享状态的应用场景。
-
-## 使用方法
-
-1. 安装依赖:
-```bash
-pnpm install
-```
-
-2. 启动开发服务器:
-```bash
-pnpm dev
-```
-
-3. 打开多个浏览器标签页访问应用，可以看到计数器在所有标签页之间同步。
-
-## 技术栈
-
-- React
-- TypeScript
-- Vite
-- [Comlink](https://github.com/GoogleChromeLabs/comlink) - Worker 通信库
-- SharedWorker
-- [@okikio/sharedworker](https://github.com/okikio/sharedworker) - SharedWorker 兼容性解决方案
-- [nanoid](https://github.com/ai/nanoid) - 生成唯一标识符

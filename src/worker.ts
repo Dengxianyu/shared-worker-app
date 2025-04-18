@@ -4,11 +4,9 @@ import { nanoid } from 'nanoid';
 // 声明 SharedWorker 的全局作用域
 declare const self: SharedWorkerGlobalScope;
 
-const endpointIds = new Set<string>();
 
 export type EventCallbackMap = {
   counterChange: (counter: number) => void;
-  workerInitSuccess: (endpointId: string) => void;
   endpointIdsChange: (endpointIds: string[]) => void;
 }
 
@@ -23,6 +21,8 @@ export type Callbacks = {
 export class WorkerExposeApi {
   private listeners: ListenersType = {};
   counter: number;
+	/** 记录所有连接的 endpointId */
+	endpointIds = new Set<string>();
 
   constructor() {
     this.counter = 0;
@@ -31,14 +31,14 @@ export class WorkerExposeApi {
   inc(num: number) {
     this.counter += num;
     // 通知所有监听器
-    this.triggerListener('counterChange', this.counter);
+    this.emit('counterChange', this.counter);
     return this.counter;
   }
 
   dec() {
     this.counter--;
     // 通知所有监听器
-    this.triggerListener('counterChange', this.counter);
+    this.emit('counterChange', this.counter);
     return this.counter;
   }
 
@@ -51,7 +51,7 @@ export class WorkerExposeApi {
   }   
 
   // 私有方法，通知所有匹配到 eventName 的 callback 执行
-  private triggerListener<T extends keyof EventCallbackMap>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]) {
+  private emit<T extends keyof EventCallbackMap>(eventName: T, data: Parameters<EventCallbackMap[T]>[0]) {
     for (const listenerKey of Object.keys(this.listeners)) {
       if (listenerKey.includes(eventName)) {
         // @ts-expect-error: 无法避免的类型错误
@@ -69,34 +69,27 @@ export class WorkerExposeApi {
     }
   }
 
+  addEndpointId(endpointId: string) {
+		this.endpointIds.add(endpointId);
+    this.emit('endpointIdsChange', Array.from(this.endpointIds));
+	}
+
   getAllEndpointIds() {
-    return Array.from(endpointIds);
+    return Array.from(this.endpointIds);
   }
 
 
   beforeUnload(endpointId: string) {
-    endpointIds.delete(endpointId);
-    this.triggerListener('endpointIdsChange', Array.from(endpointIds));
+    this.endpointIds.delete(endpointId);
+    this.emit('endpointIdsChange', Array.from(this.endpointIds));
   }
 }
 
 const exposeApi = new WorkerExposeApi();
 
-
 function start(port: MessagePort) {
-  // 每次有新的连接时，生成一个唯一的 endpointId
-  const endpointId = `endpointId__${nanoid(8)}`;
-  endpointIds.add(endpointId);
-  // 暴露给客户端的 API 是同一个对象，这样才能达到如 counter 这种值的共享
-  Comlink.expose(exposeApi, port);
-  // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端，所以不去掉 private
-  exposeApi.triggerListener('endpointIdsChange', Array.from(endpointIds));
-  // 延迟 100ms 再通知客户端初始化成功，避免客户端的监听事件还未生效就通知了
-  setTimeout(() => {
-    console.log('通知客户端初始化成功', endpointId);
-    // @ts-expect-error: 这里调用了 private 方法，但是预期不想暴露给客户端，所以不去掉 private
-    exposeApi.triggerListener('workerInitSuccess', endpointId);
-  }, 100);
+	// 暴露给客户端的 API 是同一个对象，这样才能达到如 counter 这种值的共享
+	Comlink.expose(exposeApi, port);
 }
 
 // 当有新连接时触发

@@ -4,6 +4,7 @@ import './App.css'
 import { EventCallbackMap, WorkerExposeApi } from './worker';
 import { type SharedWorkerPonyfill as SharedWorkerPonyfillType } from '@okikio/sharedworker';
 import debug from 'debug';
+import { nanoid } from 'nanoid';
 
 const appLog = debug('app').extend('render');
 const workerLog = debug('app').extend('worker');
@@ -30,51 +31,21 @@ if (SharedWorkerSupported) {
 
 const getEndpointId = (() => {
   let globalEndpointId: string | null = null;
-  let listenerId: string | null = null;
-  let getEndpointIdPromise: Promise<string> | null = null;
-  return () => {
-    // 防止同时有多个请求，而导致创建了多个 workerInitSuccess listener
-    if (getEndpointIdPromise) {
-      return getEndpointIdPromise;
-    }
-
-    getEndpointIdPromise = new Promise<string>((resolve) => {
-      if (globalEndpointId) {
-        resolve(globalEndpointId);
-        return;
-      }
-      workerApi.addListener('workerInitSuccess', Comlink.proxy((endpointId: string) => {
-        globalEndpointId = endpointId;
-        resolve(endpointId);
-        window.addEventListener('beforeunload', () => {
-            workerApi.beforeUnload(endpointId);
-        });
-        // 一旦触发过一次就取消订阅，防止新开网页时也触发 onWorkerInitSuccess 时把自己的 endpointId 覆盖了
-        if (listenerId) {
-          workerApi.off(listenerId);
-        }
-      })).then((_listenerId: string) => {
-        listenerId = _listenerId;
-      });
-    })
-    return getEndpointIdPromise;
-  }
+	return () => {
+		if (globalEndpointId) {
+			return globalEndpointId;
+		}
+		globalEndpointId = `endpointId__${nanoid(8)}`;
+    workerLog('addEndpointId', globalEndpointId);
+		workerApi.addEndpointId(globalEndpointId);
+		window.addEventListener('beforeunload', () => {
+			if (globalEndpointId) {
+				workerApi.beforeUnload(globalEndpointId);
+			}
+		});
+		return globalEndpointId;
+	};
 })()
-
-
-getEndpointId().then((endpointId) => {
-  workerLog('endpointId', endpointId);
-})
-
-function useGetEndpointId() {
-  const [endpointId, setEndpointId] = useState<string | null>(null);
-  useEffect(() => {
-    getEndpointId().then((endpointId) => {
-      setEndpointId(endpointId);
-    })
-  }, []);
-  return endpointId;
-}
 
 function useGetAllEndpointIds() {
   const [endpointIds, setEndpointIds] = useState<string[]>([]);
@@ -116,7 +87,7 @@ function useSubWorkerEvent<T extends keyof EventCallbackMap>(eventName: T, liste
 function AppContent() {
   const [count, setCount] = useState(0);
   const isFirstTimeRender = useRef(true);
-  const endpointId = useGetEndpointId();
+  const endpointId = getEndpointId();
   const endpointIds = useGetAllEndpointIds();
   
   useEffect(() => {
